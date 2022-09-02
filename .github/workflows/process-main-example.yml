@@ -1,0 +1,24 @@
+---
+name: Process Main example
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '*.tf'
+
+
+
+jobs:
+  mainExample:
+    name: Main Definition
+    uses: innofactororg/ghw-markdown-convert/.github/workflows/build-documentation.yml@main
+    secrets: inherit
+    with:
+      OrderFile: design/pdfDocument.order
+      OutFile: azGovernance-document.pdf
+
+  build-main-definition:
+    name: Build Main Definition
+    uses: ./.github/workflows/_build-definition.yml
+    secrets: inherit

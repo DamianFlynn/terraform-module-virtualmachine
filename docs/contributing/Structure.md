@@ -8,7 +8,7 @@ The Git repository contains the following directories and are ordered below for 
 📁 docs                # documents
 ├─📁 contributing      # contribution guide
 ├─📁 design            # solution design details, well architected
-📁 docs                
+📁 examples                
 ├─📁 main              # The main example for using the module
 ├─📁 ...               # Additional examples
 📁 modules             
