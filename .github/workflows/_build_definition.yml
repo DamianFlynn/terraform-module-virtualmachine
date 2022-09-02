@@ -1,0 +1,443 @@
+---
+name: "🧳 Build Main Definition"
+
+on:
+  workflow_call:
+
+
+jobs:
+  build-definition:
+    runs-on: ubuntu-latest
+    name: "Process Main Definition"
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_AD_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_AD_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      # Has this workflow already commented on the PR?
+      - name: Find Intial Comment
+        uses: peter-evans/find-comment@v2
+        id: initial-comment
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: "github-actions[bot]"
+          body-includes: Configuration Planning
+
+      - name: Comment on PR Configuration Planning ${{ matrix.directory }}
+        if: steps.initial-comment.outputs.comment-id == ''
+        id: build-example-comment
+        uses: peter-evans/create-or-update-comment@v2
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            # Configuration Planning
+
+      # Initial Workflow Comment Reference for Updates
+      - name: Find Comment
+        uses: peter-evans/find-comment@v2
+        id: fc
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: "github-actions[bot]"
+          body-includes: Configuration Planning
+
+      # Clone the repo to the 'src' folder
+      - name: Clone repository for analysis
+        uses: actions/checkout@v3
+        with:
+          # ref: ${{ github.sha }}
+          path: src
+          fetch-depth: 1
+
+      - name: Attempt to download an existing Plan SHA
+        uses: damianflynn/gha-azblob-download-artifact@master
+        id: get-plan-sha
+        with:
+          connection-string: ${{ secrets.ACF_REF_AZ_ARTIFACT_STORAGE_CONN }}
+          name: definition-plan_${{ github.event.repository.name }}_PR${{ github.event.pull_request.number }}
+          path: ${{ github.workspace }}/plans
+
+      - name: If we have an exisiting Plan get its SHA
+        id: store-plan-sha
+        continue-on-error: true
+        if: steps.get-plan-sha.outcome == 'success'
+        run: |
+          lastPlanSHA=$(cat ${{ github.workspace }}/plans/tfplan.SHA )
+          echo "Found: $lastPlanSHA"
+          echo "::set-output name=lastPlanSHA::$lastPlanSHA"
+
+      - name: Yes we have a plan, Has a commit changed source since?
+        id: changes-since-plan
+        if: steps.store-plan-sha.outcome == 'success'
+        run: |
+          cd src
+          git fetch
+
+          echo "::set-output name=all::$(git diff --name-only --diff-filter=ACMRT ${{ steps.store-plan-sha.outputs.lastPlanSHA }} ${{ github.sha }} | xargs)"
+
+          echo "::set-output name=tf::$(git diff --name-only --diff-filter=ACMRT ${{ steps.store-plan-sha.outputs.lastPlanSHA }} ${{ github.sha }} | grep .tf$ | xargs )"
+
+          echo "::set-output name=definition::$(git diff --name-only --diff-filter=ACMRT ${{ steps.store-plan-sha.outputs.lastPlanSHA }} ${{ github.sha }} | grep .tf$  | grep -Fv -e examples/ -e docs/ | xargs )"
+
+      - name: Check outputs from changeset
+        if: steps.store-plan-sha.outcome == 'success'
+        run: |
+          echo "All - ${{ steps.changes-since-plan.outputs.all }}"
+          echo "TF - ${{ steps.changes-since-plan.outputs.tf }}"
+          echo "Definition - ${{ steps.changes-since-plan.outputs.definition }}"
+
+      # Logic needs to trigger
+      # IF no plan
+      # OR IF no Changed File
+      # Grab the Current Terraform Binaries
+      - name: Setup Terraform
+        if: steps.changes-since-plan.outputs.definition == ''
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.2.3
+
+      - name: Update comment with Preping
+        if: steps.fc.outputs.comment-id != '' && steps.init.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+
+            - Initializing deployment tool chain.
+            - Plan Id: ${{github.event.pull_request.head.sha}}
+
+          edit-mode: append
+          reactions: rocket
+
+      ##
+      ## STAGE 1 - Terraform Init
+      ##
+      # Initialize requirements for Terraform
+      # https://www.terraform.io/cli/config/environment-variables#tf_cli_args-and-tf_cli_args_name
+      - name: Initialize Terraform
+        if: steps.changes-since-plan.outputs.definition == ''
+        id: init
+        continue-on-error: true
+        run: |
+          mkdir plans
+          cd src
+          terraform init -input=false
+        # terraform init -reconfigure
+        # env:
+        #   TF_CLI_ARGS: '-var-file="env/dev.tfvars" -backend-config="bucket=${{ secrets.STATE_BUCKET }}" -backend-config="prefix=dev"'
+
+      # Sed is removing all the ANSI Color code messages from the error.
+      - name: Reformat Failed Init
+        if: steps.init.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          echo '${{ steps.init.outputs.stderr }}' \
+          | sed -E 's/\x1b\[[0-9;]*m//g' > init.txt
+
+      - name: Output formatted init error
+        if: steps.init.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        id: get-init-body
+        run: |
+          body="$(cat init.txt)"
+          body="${body//'%'/'%25'}"
+          body="${body//$'\n'/'%0A'}"
+          body="${body//$'\r'/'%0D'}"
+          echo "::set-output name=body::$body"
+
+      - name: Update comment with Init Failure
+        if: steps.fc.outputs.comment-id != '' && steps.init.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+            # Configuration Planning
+
+            Plan Id: ${{github.event.pull_request.head.sha}}
+
+            ## Terraform Init Failed
+
+            ```
+            ${{ steps.init.outputs.stdout }}
+            ```
+
+            Formatted:
+            ```
+            ${{ steps.get-init-body.outputs.body }}
+            ```
+          reactions: -1
+          edit-mode: replace
+
+      - name: Fail workflow due to init
+        if: steps.init.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          echo "Terraform Init Failed"
+          exit 1
+
+      ##
+      ## STAGE 2 - Terraform Plan
+      ##
+
+      # Execute and Terraform Plan to deterime the changes
+      # and update the PR with the findings
+      - name: Plan Terraform
+        id: plan
+        if: steps.init.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        continue-on-error: true
+        run: |
+          cd src
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=${{ github.workspace }}/plans/tfplan \
+          && terraform show \
+            -no-color ${{ github.workspace }}/plans/tfplan
+
+      - name: Store the Current Plan SHA
+        if: steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          expr ${{github.event.pull_request.head.sha}} | tee ${{ github.workspace }}/plans/tfplan.SHA
+
+      # - name: Setup upterm session
+      #   uses: lhotari/action-upterm@v1
+      #   with:
+      #     ## limits ssh access and adds the ssh public key for the user which triggered the workflow
+      #     limit-access-to-actor: false
+
+      - name: Store the Current Terraform Lockfile
+        if: steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          cp -v src/.terraform.lock.hcl plans/terraform.lock.hcl
+      #        cp -Rv src/.terraform plans/
+      - name: Upload Plan and SHA artifacts
+        if: steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        uses: damianflynn/gha-azblob-upload-artifact@master
+        id: put-plan-sha
+        with:
+          connection-string: ${{ secrets.ACF_REF_AZ_ARTIFACT_STORAGE_CONN }}
+          name: definition-plan_${{ github.event.repository.name }}_PR${{ github.event.pull_request.number }}
+          path: ${{ github.workspace }}/plans
+
+      # Sed is taking all lines that begin with one or more spaces
+      # followed by a `+` or `-`.
+      # It stores the amount of spaces in `\1` and the +/- in `\2`.
+      # Then replace that portion of the line with `\2\1` (+/- followed by the number of matched spaces).
+      - name: Reformat Plan
+        if: steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+          | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+
+      - name: Output formatted plan
+        id: get-comment-body
+        if: steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          body="$(cat plan.txt)"
+          body="${body//'%'/'%25'}"
+          body="${body//$'\n'/'%0A'}"
+          body="${body//$'\r'/'%0D'}"
+          echo "::set-output name=body::$body"
+
+      - name: Update comment with Plan
+        if: steps.fc.outputs.comment-id != '' &&  steps.plan.outcome == 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+            # Configuration Planning
+
+            Plan Id: ${{github.event.pull_request.head.sha}}
+            Storage: `definition-plan_${{ github.event.repository.name }}_PR${{ github.event.pull_request.number }}`
+
+            ## Terraform Plan
+
+            ```diff
+            ${{ steps.get-comment-body.outputs.body }}
+            ```
+
+            ## Next steps
+
+            1. Review and approve the plan
+            2. Deploy the plan
+
+            When you are ready to deploy, add a comment to this pull request including the message `/deploy`
+
+          edit-mode: replace
+
+      - name: Update comment with Failed Plan
+        if: steps.fc.outputs.comment-id != '' &&  steps.plan.outcome == 'failure' && ( steps.changes-since-plan.outputs.definition == '' )
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+            # Configuration Planning
+
+            Plan Id: ${{github.event.pull_request.head.sha}}
+
+            ## Terraform Plan Failed
+
+            ```
+            ${{ steps.plan.outputs.stderr }}
+            ```
+          reactions: -1
+          edit-mode: replace
+
+      - name: Fail workflow due to plan
+        if: steps.plan.outcome != 'success' && ( steps.changes-since-plan.outputs.definition == '' )
+        run: |
+          echo "Terraform Plan Failed"
+          exit 1
+
+      ##
+      ## STAGE 3 - Infrastructure Costs?
+      ##
+
+      # Checkout the base branch of the pull request (e.g. main/master).
+      - name: Checkout base branch
+        uses: actions/checkout@v2
+        with:
+          path: main
+          ref: "${{ github.event.pull_request.base.ref }}"
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Generate Infracost JSON file as the baseline.
+      - name: Generate Infracost cost estimate baseline
+        run: |
+          infracost breakdown --path=main \
+                              --format=json \
+                              --out-file=${{ github.workspace }}/plans/infracost-base.json
+
+      # Generate an Infracost diff and save it to a JSON file.
+      - name: Generate Infracost diff
+        run: |
+          infracost diff --path=src \
+                          --format=json \
+                          --compare-to=${{ github.workspace }}/plans/infracost-base.json \
+                          --out-file=${{ github.workspace }}/plans/infracost.json
+
+      # Posts a comment to the PR using the 'update' behavior.
+      # This creates a single comment and updates it. The "quietest" option.
+      # The other valid behaviors are:
+      #   delete-and-new - Delete previous comments and create a new one.
+      #   hide-and-new - Minimize previous comments and create a new one.
+      #   new - Create a new cost estimate comment on every push.
+      # See https://www.infracost.io/docs/features/cli_commands/#comment-on-pull-requests for other options.
+      # The INFRACOST_ENABLE_CLOUD​=true section instructs the CLI to send its JSON output to Infracost Cloud.
+      #   This SaaS product gives you visibility across all changes in a dashboard. The JSON output does not
+      #   contain any cloud credentials or secrets.
+      - name: Post Infracost comment
+        run: |
+          infracost comment github --path=${{ github.workspace }}/plans/infracost.json \
+                --repo=$GITHUB_REPOSITORY \
+                --github-token=${{github.token}} \
+                --pull-request=${{github.event.pull_request.number}} \
+                --behavior=update
+
+      ##
+      ## STAGE 3 - Terraform Apply
+      ##
+
+      # # Apply the Plan
+      # - name: Apply Terraform
+      #   if: steps.plan.outcome == 'success'
+      #   id: apply
+      #   continue-on-error: true
+      #   run: |
+      #     cd src/${{ matrix.directory }}
+      #     terraform apply \
+      #       -input=false \
+      #       -no-color \
+      #       tfplan
+
+      # - name: Update comment with Apply
+      #   if: steps.fc.outputs.comment-id != '' &&  steps.apply.outcome == 'success'
+      #   uses: peter-evans/create-or-update-comment@v1
+      #   with:
+      #     comment-id: ${{ steps.fc.outputs.comment-id }}
+      #     body: |
+      #       ## Terraform Apply
+
+      #       Environment status:
+      #       ```
+      #       ${{ steps.apply.outputs.stdout }}
+      #       ```
+
+      #     edit-mode: append
+
+      # - name: Update comment with Apply Failure
+      #   if: steps.fc.outputs.comment-id != '' &&  steps.apply.outcome == 'failure'
+      #   uses: peter-evans/create-or-update-comment@v1
+      #   with:
+      #     comment-id: ${{ steps.fc.outputs.comment-id }}
+      #     body: |
+      #       ## Terraform Apply Failed
+
+      #       ```
+      #       ${{ steps.apply.outputs.stderr }}
+      #       ```
+      #     reactions: -1
+      #     edit-mode: append
+
+      # - name: Fail workflow due to apply
+      #   if: steps.apply.outcome != 'success'
+      #   run: |
+      #     echo "Terraform Apply Failed"
+      #     exit 1
+
+      # ##
+      # ## STAGE 4 - Terraform Destroy
+      # ##
+
+      # # Clean Up
+      # - name: Terraform Destroy
+      #   if: steps.apply.outcome == 'success'
+      #   id: destroy
+      #   continue-on-error: true
+      #   run: |
+      #     cd src/${{ matrix.directory }}
+      #     terraform destroy \
+      #       -input=false \
+      #       -auto-approve \
+      #       -no-color
+
+      # - name: Update comment with Destroy
+      #   if: steps.fc.outputs.comment-id != '' &&  steps.destroy.outcome == 'success'
+      #   uses: peter-evans/create-or-update-comment@v1
+      #   with:
+      #     comment-id: ${{ steps.fc.outputs.comment-id }}
+      #     body: |
+      #       ## Terraform Destroy
+
+      #       Environment status:
+      #       ```
+      #       ${{ steps.destroy.outputs.stdout }}
+      #       ```
+
+      #     edit-mode: append
+
+      # - name: Update comment with Destroy Failure
+      #   if: steps.fc.outputs.comment-id != '' &&  steps.destroy.outcome == 'failure'
+      #   uses: peter-evans/create-or-update-comment@v1
+      #   with:
+      #     comment-id: ${{ steps.fc.outputs.comment-id }}
+      #     body: |
+      #       ## Terraform Destroy Failed
+
+      #       ```
+      #       ${{ steps.destroy.outputs.stderr }}
+      #       ```
+      #     reactions: -1
+      #     edit-mode: append
+
+      # - name: Fail workflow due to destroy
+      #   if: steps.destroy.outcome != 'success'
+      #   run: |
+      #     echo "Terraform Destroy Failed"
+      #     exit 1
