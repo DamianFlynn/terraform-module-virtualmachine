@@ -8,9 +8,6 @@
 #
 # Once deployed, the module is called to deploy the Virtual Machine
 
-##
-## Configuration
-##
 
 ## Define the Target Environments
 provider "azurerm" {
