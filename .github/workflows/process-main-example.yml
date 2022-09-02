@@ -10,15 +10,8 @@ on:
 
 
 jobs:
-  mainExample:
-    name: Main Definition
-    uses: innofactororg/ghw-markdown-convert/.github/workflows/build-documentation.yml@main
-    secrets: inherit
-    with:
-      OrderFile: design/pdfDocument.order
-      OutFile: azGovernance-document.pdf
 
-  build-main-definition:
-    name: Build Main Definition
-    uses: ./.github/workflows/_build-definition.yml
+  process-main-definition:
+    name: Process Main Definition
+    uses: ./.github/workflows/_build_definition.yml
     secrets: inherit
